@@ -2,8 +2,15 @@
 const Payment = require("../models/Payment");
 const Reservation = require("../models/Reservation");
 
+// ==========================================
+// DATE HELPERS
+// ==========================================
+
+// Add leading zero to month, day, and hour values.
 const pad = (value) => String(value).padStart(2, "0");
 
+// Convert a Date object into YYYY-MM-DD.
+// Uses local date values to avoid UTC date shifting.
 const toDateKey = (date) => {
     return [
         date.getFullYear(),
@@ -12,14 +19,17 @@ const toDateKey = (date) => {
     ].join("-");
 };
 
+// Parse YYYY-MM-DD as a local date.
 const parseDate = (value) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) {
         return null;
     }
 
     const [year, month, day] = value.split("-").map(Number);
+
     const date = new Date(year, month - 1, day);
 
+    // Reject invalid dates such as February 30.
     if (
         date.getFullYear() !== year ||
         date.getMonth() !== month - 1 ||
@@ -30,6 +40,10 @@ const parseDate = (value) => {
 
     return date;
 };
+
+// ==========================================
+// REPORT DATE RANGE
+// ==========================================
 
 const getPeriodRange = (period, selectedDate) => {
     const date = new Date(selectedDate);
@@ -88,14 +102,23 @@ const getPeriodRange = (period, selectedDate) => {
     return null;
 };
 
+// ==========================================
+// CHART BUCKETS
+// ==========================================
+
 const createBuckets = (period, start, end) => {
     const buckets = [];
 
+    // Daily report: 24 hourly buckets.
     if (period === "daily") {
         for (let hour = 0; hour < 24; hour++) {
             buckets.push({
                 key: String(hour),
-                label: `${hour % 12 || 12} ${hour < 12 ? "AM" : "PM"}`,
+
+                label: `${hour % 12 || 12} ${
+                    hour < 12 ? "AM" : "PM"
+                }`,
+
                 revenue: 0,
                 bookings: 0
             });
@@ -104,6 +127,7 @@ const createBuckets = (period, start, end) => {
         return buckets;
     }
 
+    // Weekly and monthly reports: one bucket per day.
     const current = new Date(start);
 
     while (current < end) {
@@ -111,9 +135,13 @@ const createBuckets = (period, start, end) => {
 
         buckets.push({
             key,
+
             label: period === "weekly"
-                ? current.toLocaleDateString("en-PH", { weekday: "short" })
+                ? current.toLocaleDateString("en-PH", {
+                    weekday: "short"
+                })
                 : String(current.getDate()),
+
             revenue: 0,
             bookings: 0
         });
@@ -124,6 +152,10 @@ const createBuckets = (period, start, end) => {
     return buckets;
 };
 
+// ==========================================
+// BUCKET KEY
+// ==========================================
+
 const getBucketKey = (date, period) => {
     if (period === "daily") {
         return String(date.getHours());
@@ -132,10 +164,39 @@ const getBucketKey = (date, period) => {
     return toDateKey(date);
 };
 
-// GET /api/reports?period=daily&date=2026-11-23
+// ==========================================
+// NORMALIZE STATUS
+// ==========================================
+
+const normalizeStatus = (status) => {
+    return String(status || "").trim().toLowerCase();
+};
+
+// ==========================================
+// SAFE NUMBER
+// ==========================================
+
+const toNumber = (value) => {
+    const number = Number(value);
+
+    return Number.isFinite(number) ? number : 0;
+};
+
+// ==========================================
+// GET REPORTS
+// GET /api/reports?period=daily&date=2026-11-24
+// ==========================================
+
 const getReports = async (req, res) => {
     try {
-        const { period = "daily", date } = req.query;
+        const {
+            period = "daily",
+            date
+        } = req.query;
+
+        // --------------------------------------
+        // VALIDATE REPORT PERIOD
+        // --------------------------------------
 
         if (!["daily", "weekly", "monthly"].includes(period)) {
             return res.status(400).json({
@@ -143,6 +204,10 @@ const getReports = async (req, res) => {
                 message: "Invalid report period."
             });
         }
+
+        // --------------------------------------
+        // VALIDATE SELECTED DATE
+        // --------------------------------------
 
         const selectedDate = parseDate(date);
 
@@ -152,6 +217,10 @@ const getReports = async (req, res) => {
                 message: "Please provide a valid date in YYYY-MM-DD format."
             });
         }
+
+        // --------------------------------------
+        // GET REPORT DATE RANGE
+        // --------------------------------------
 
         const range = getPeriodRange(period, selectedDate);
 
@@ -164,55 +233,121 @@ const getReports = async (req, res) => {
 
         const { start, end } = range;
 
+        // --------------------------------------
+        // GET DATABASE RECORDS
+        // --------------------------------------
+        // IMPORTANT:
+        // This assumes your Payment model uses
+        // paymentDate and your Reservation model
+        // uses reservationDate.
+        //
+        // These field names must match your schemas.
+
         const [payments, reservations] = await Promise.all([
             Payment.find({
                 paymentDate: {
                     $gte: start,
                     $lt: end
                 }
-            }).select("amount status paymentDate paymentMethod"),
+            })
+                .select("amount status paymentDate paymentMethod")
+                .lean(),
 
             Reservation.find({
                 reservationDate: {
                     $gte: start,
                     $lt: end
                 }
-            }).select("status paymentStatus totalAmount startTime reservationDate")
+            })
+                .select(
+                    "status paymentStatus totalAmount startTime reservationDate"
+                )
+                .lean()
         ]);
 
+        console.log("========== REPORT DEBUG ==========");
+        console.log("Period:", period);
+        console.log("Start:", start);
+        console.log("End:", end);
+        console.log("Payments found:", payments.length);
+        console.log("Reservations found:", reservations.length);
+        console.log("==================================");
+
+        // --------------------------------------
+        // CREATE CHART BUCKETS
+        // --------------------------------------
+
         const buckets = createBuckets(period, start, end);
+
         const bucketMap = new Map(
             buckets.map((bucket) => [bucket.key, bucket])
         );
 
+        // ======================================
+        // PAYMENT STATISTICS
+        // ======================================
+
         let totalRevenue = 0;
+
         let paidPayments = 0;
         let pendingPayments = 0;
         let rejectedPayments = 0;
         let refundedPayments = 0;
+
         let refundedAmount = 0;
 
         payments.forEach((payment) => {
+            const status = normalizeStatus(payment.status);
+            const amount = toNumber(payment.amount);
+
             const paymentDate = new Date(payment.paymentDate);
+
             const key = getBucketKey(paymentDate, period);
+
             const bucket = bucketMap.get(key);
 
-            if (payment.status === "Paid") {
-                totalRevenue += payment.amount;
+            // ----------------------------------
+            // PAID PAYMENTS
+            // ----------------------------------
+
+            if (status === "paid") {
+                totalRevenue += amount;
                 paidPayments += 1;
 
                 if (bucket) {
-                    bucket.revenue += payment.amount;
+                    bucket.revenue += amount;
                 }
-            } else if (payment.status === "Pending") {
+            }
+
+            // ----------------------------------
+            // PENDING PAYMENTS
+            // ----------------------------------
+
+            else if (status === "pending") {
                 pendingPayments += 1;
-            } else if (payment.status === "Rejected") {
+            }
+
+            // ----------------------------------
+            // REJECTED PAYMENTS
+            // ----------------------------------
+
+            else if (status === "rejected") {
                 rejectedPayments += 1;
-            } else if (payment.status === "Refunded") {
+            }
+
+            // ----------------------------------
+            // REFUNDED PAYMENTS
+            // ----------------------------------
+
+            else if (status === "refunded") {
                 refundedPayments += 1;
-                refundedAmount += payment.amount;
+                refundedAmount += amount;
             }
         });
+
+        // ======================================
+        // RESERVATION STATISTICS
+        // ======================================
 
         let confirmedReservations = 0;
         let completedReservations = 0;
@@ -220,12 +355,27 @@ const getReports = async (req, res) => {
         let pendingReservations = 0;
 
         reservations.forEach((reservation) => {
-            const reservationDate = new Date(reservation.reservationDate);
-            const key = period === "daily"
-                ? String(
-                    Number(String(reservation.startTime || "0:0").split(":")[0])
-                )
-                : getBucketKey(reservationDate, period);
+            const status = normalizeStatus(reservation.status);
+
+            const reservationDate = new Date(
+                reservation.reservationDate
+            );
+
+            // ----------------------------------
+            // DAILY REPORT USES RESERVATION HOUR
+            // ----------------------------------
+
+            let key;
+
+            if (period === "daily") {
+                const hour = Number(
+                    String(reservation.startTime || "0:0").split(":")[0]
+                );
+
+                key = String(hour);
+            } else {
+                key = getBucketKey(reservationDate, period);
+            }
 
             const bucket = bucketMap.get(key);
 
@@ -233,80 +383,126 @@ const getReports = async (req, res) => {
                 bucket.bookings += 1;
             }
 
-            if (reservation.status === "Confirmed") {
+            // ----------------------------------
+            // RESERVATION STATUS
+            // ----------------------------------
+
+            if (status === "confirmed") {
                 confirmedReservations += 1;
-            } else if (reservation.status === "Completed") {
+            }
+
+            else if (status === "completed") {
                 completedReservations += 1;
-            } else if (reservation.status === "Cancelled") {
+            }
+
+            else if (status === "cancelled") {
                 cancelledReservations += 1;
-            } else if (reservation.status === "Pending") {
+            }
+
+            else if (status === "pending") {
                 pendingReservations += 1;
             }
         });
 
         const totalReservations = reservations.length;
 
-        const paymentMethods = payments.reduce((result, payment) => {
+        // ======================================
+        // PAYMENT METHOD BREAKDOWN
+        // ======================================
+
+        const paymentMethods = {};
+
+        payments.forEach((payment) => {
             const method = payment.paymentMethod || "Other";
 
-            if (!result[method]) {
-                result[method] = {
+            if (!paymentMethods[method]) {
+                paymentMethods[method] = {
                     count: 0,
                     amount: 0
                 };
             }
 
-            result[method].count += 1;
+            const amount = toNumber(payment.amount);
 
-            if (payment.status === "Paid") {
-                result[method].amount += payment.amount;
+            paymentMethods[method].count += 1;
+
+            // Only paid payments contribute to collected amount.
+            if (normalizeStatus(payment.status) === "paid") {
+                paymentMethods[method].amount += amount;
             }
+        });
 
-            return result;
-        }, {});
+        // ======================================
+        // FINAL RESPONSE
+        // ======================================
 
-        res.status(200).json({
+        return res.status(200).json({
             success: true,
+
             period,
+
             selectedDate: toDateKey(selectedDate),
+
             dateRange: {
                 start: toDateKey(start),
-                end: toDateKey(new Date(end.getTime() - 1))
+
+                // Display inclusive ending date.
+                end: toDateKey(
+                    new Date(end.getTime() - 1)
+                )
             },
+
             summary: {
-                totalRevenue,
+                totalRevenue: Number(totalRevenue.toFixed(2)),
+
                 totalReservations,
+
                 paidPayments,
                 pendingPayments,
                 rejectedPayments,
                 refundedPayments,
-                refundedAmount,
+
+                refundedAmount: Number(
+                    refundedAmount.toFixed(2)
+                ),
+
                 confirmedReservations,
                 completedReservations,
                 cancelledReservations,
                 pendingReservations
             },
+
             paymentMethods,
+
             charts: {
                 revenue: buckets.map((bucket) => ({
                     label: bucket.label,
                     value: Number(bucket.revenue.toFixed(2))
                 })),
+
                 bookings: buckets.map((bucket) => ({
                     label: bucket.label,
                     value: bucket.bookings
                 }))
             }
         });
+
     } catch (error) {
         console.error("Get Reports Error:", error);
 
-        res.status(500).json({
+        return res.status(500).json({
             success: false,
-            message: "Failed to generate reports."
+            message: "Failed to generate reports.",
+            ...(process.env.NODE_ENV !== "production" && {
+                error: error.message
+            })
         });
     }
 };
+
+// ==========================================
+// EXPORT CONTROLLER
+// ==========================================
 
 module.exports = {
     getReports
