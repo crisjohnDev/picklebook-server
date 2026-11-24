@@ -13,6 +13,21 @@ const {
     calculateBookingAmount
 } = require("../utils/bookingSettings");
 
+const logActivity = require("../utils/activityLogger");
+
+// ==========================================
+// SAFE ACTIVITY LOGGER
+// Activity logging must never cancel a booking.
+// ==========================================
+
+const safeLogActivity = async (activityData) => {
+    try {
+        await logActivity(activityData);
+    } catch (error) {
+        console.error("Activity Logging Failed:", error.message);
+    }
+};
+
 // ==========================================
 // TIME HELPERS
 // ==========================================
@@ -28,7 +43,6 @@ const timeToMinutes = (time) => {
 // ==========================================
 
 // Validate and parse YYYY-MM-DD as a local date.
-// This avoids UTC conversion problems caused by toISOString().
 const parseLocalDate = (dateString) => {
     if (
         typeof dateString !== "string" ||
@@ -95,7 +109,6 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // Validate court ID.
         if (!mongoose.Types.ObjectId.isValid(courtId)) {
             return res.status(400).json({
                 success: false,
@@ -103,7 +116,6 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // Validate customer name and phone.
         const customerName = String(fullName).trim();
         const customerPhone = String(phone).trim();
 
@@ -140,7 +152,6 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // Prevent past reservations.
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
@@ -256,7 +267,6 @@ const createWalkInReservation = async (req, res) => {
         // 7. CALCULATE RESERVATION AMOUNT
         // ==========================================
 
-        // Always calculate the final price on the server.
         const totalAmount = calculateBookingAmount({
             startTime,
             endTime,
@@ -270,8 +280,6 @@ const createWalkInReservation = async (req, res) => {
 
         const username = `walkin_${crypto.randomBytes(8).toString("hex")}`;
 
-        // Walk-in customers receive random credentials.
-        // They do not need to create a password themselves.
         const temporaryPassword = crypto.randomBytes(32).toString("hex");
 
         const hashedPassword = await bcrypt.hash(
@@ -309,7 +317,60 @@ const createWalkInReservation = async (req, res) => {
         });
 
         // ==========================================
-        // 10. POPULATE RESERVATION RESPONSE
+        // 10. RECORD CUSTOMER ACTIVITY
+        // ==========================================
+
+        await safeLogActivity({
+            actor: req.user,
+            action: "walk_in_customer_created",
+            description: `Walk-in customer ${customerName} was created.`,
+            category: "customer",
+            relatedId: createdCustomer._id,
+            relatedModel: "User",
+            metadata: {
+                customerName,
+                customerId: createdCustomer._id,
+                phone: customerPhone,
+                source: "walk_in"
+            },
+            notificationTitle: "New Walk-in Customer",
+            notificationMessage: `${customerName} was added as a walk-in customer.`,
+            recipientRole: "admin",
+            link: "/admin/customers"
+        });
+
+        // ==========================================
+        // 11. RECORD RESERVATION ACTIVITY
+        // ==========================================
+
+        await safeLogActivity({
+            actor: req.user,
+            action: "walk_in_reservation_created",
+            description: `A walk-in reservation was created for ${customerName} at ${court.name || "the selected court"}.`,
+            category: "reservation",
+            relatedId: createdReservation._id,
+            relatedModel: "Reservation",
+            metadata: {
+                customerName,
+                customerId: createdCustomer._id,
+                reservationId: createdReservation._id,
+                courtName: court.name,
+                courtId: court._id,
+                reservationDate,
+                startTime,
+                endTime,
+                duration,
+                totalAmount,
+                bookingType: "walk_in"
+            },
+            notificationTitle: "New Walk-in Reservation",
+            notificationMessage: `${customerName} booked ${court.name || "a court"} on ${reservationDate} from ${startTime} to ${endTime}.`,
+            recipientRole: "admin",
+            link: "/admin/reservations"
+        });
+
+        // ==========================================
+        // 12. POPULATE RESERVATION RESPONSE
         // ==========================================
 
         const populatedReservation = await Reservation.findById(
@@ -321,7 +382,7 @@ const createWalkInReservation = async (req, res) => {
             .lean();
 
         // ==========================================
-        // 11. SUCCESS RESPONSE
+        // 13. SUCCESS RESPONSE
         // ==========================================
 
         return res.status(201).json({
@@ -340,12 +401,11 @@ const createWalkInReservation = async (req, res) => {
     } catch (error) {
 
         // ==========================================
-        // 12. CLEANUP IF SOMETHING FAILS
+        // 14. CLEANUP IF SOMETHING FAILS
         // ==========================================
 
         console.error("Walk-In Reservation Error:", error);
 
-        // Remove the reservation if it was already created.
         if (createdReservation) {
             await Reservation.findByIdAndDelete(
                 createdReservation._id
@@ -357,7 +417,6 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // Remove the generated customer account.
         if (createdCustomer) {
             await User.findByIdAndDelete(
                 createdCustomer._id

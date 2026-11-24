@@ -2,10 +2,6 @@
 const ActivityLog = require("../models/ActivityLog");
 const Notification = require("../models/Notification");
 
-// ==========================================
-// ACTIVITY LOGGER
-// ==========================================
-
 const logActivity = async ({
     actor = null,
     actorName = null,
@@ -20,15 +16,19 @@ const logActivity = async ({
 
     metadata = {},
 
-    // Notification settings
     notificationTitle = null,
     notificationMessage = null,
     recipient = null,
     recipientRole = "admin",
     link = null
 }) => {
+    console.log("[ACTIVITY LOGGER] Called:", {
+        action,
+        category,
+        relatedModel
+    });
+
     try {
-        // Get actor information
         const actorId = actor?._id || actor?.id || null;
 
         const resolvedActorName =
@@ -41,51 +41,45 @@ const logActivity = async ({
         const resolvedActorRole =
             actor?.role || actorRole || "system";
 
-        // ======================================
-        // SAVE ACTIVITY LOG
-        // ======================================
+        console.log("[ACTIVITY LOGGER] Saving activity...");
 
         const activity = await ActivityLog.create({
             actor: actorId,
             actorName: resolvedActorName,
             actorRole: resolvedActorRole,
-
             action,
             description,
             category,
-
             relatedId,
             relatedModel,
-
             metadata
         });
 
-        // ======================================
-        // CREATE NOTIFICATION
-        // ======================================
+        console.log("[ACTIVITY LOGGER] SAVED:", {
+            id: activity._id.toString(),
+            action: activity.action,
+            category: activity.category
+        });
 
         if (notificationTitle && notificationMessage) {
             try {
                 await Notification.create({
                     recipient,
                     recipientRole,
-
                     title: notificationTitle,
                     message: notificationMessage,
-
                     type: category,
-
                     relatedId,
                     relatedModel,
-
                     link,
-
                     isRead: false
                 });
+
+                console.log("[ACTIVITY LOGGER] Notification saved.");
             } catch (notificationError) {
                 console.error(
-                    "Notification creation failed:",
-                    notificationError
+                    "[ACTIVITY LOGGER] Notification failed:",
+                    notificationError.message
                 );
             }
         }
@@ -93,9 +87,15 @@ const logActivity = async ({
         return activity;
 
     } catch (error) {
-        console.error("Activity logging failed:", error);
+        console.error("[ACTIVITY LOGGER] DATABASE SAVE FAILED:", {
+            name: error.name,
+            code: error.code,
+            message: error.message,
+            errors: error.errors
+                ? Object.keys(error.errors)
+                : undefined
+        });
 
-        // Do not interrupt the main business operation
         return null;
     }
 };
