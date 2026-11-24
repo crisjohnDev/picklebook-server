@@ -1,6 +1,5 @@
 
 const mongoose = require("mongoose");
-
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
 
@@ -8,12 +7,18 @@ const Reservation = require("../models/Reservation");
 const Court = require("../models/Court");
 const User = require("../models/User");
 
+const logActivity = require("../utils/activityLogger");
+
 const {
     getBookingSettings,
     validateBookingRules,
     calculateBookingAmount,
     isCancellationAllowed
 } = require("../utils/bookingSettings");
+
+// ==========================================
+// HELPER FUNCTIONS
+// ==========================================
 
 // Convert HH:mm into minutes after midnight
 const timeToMinutes = (time) => {
@@ -62,19 +67,16 @@ const hasReservationConflict = async ({
 
     const query = {
         court: courtId,
+
         reservationDate: {
             $gte: dateRange.start,
             $lt: dateRange.end
         },
 
-        // Cancelled reservations do not block a court
         status: {
             $in: ["Pending", "Confirmed", "Completed"]
         },
 
-        // Overlap condition:
-        // Existing start < requested end
-        // Existing end > requested start
         startTime: { $lt: endTime },
         endTime: { $gt: startTime }
     };
@@ -88,7 +90,44 @@ const hasReservationConflict = async ({
     return Boolean(existingReservation);
 };
 
+// ==========================================
+// ACTIVITY LOGGING HELPER
+// ==========================================
+
+const recordReservationActivity = async ({
+    req,
+    reservation,
+    action,
+    description,
+    notificationTitle,
+    notificationMessage,
+    metadata = {}
+}) => {
+    await logActivity({
+        actor: req.user,
+
+        action,
+        description,
+
+        category: "reservation",
+
+        relatedId: reservation._id,
+        relatedModel: "Reservation",
+
+        metadata,
+
+        notificationTitle,
+        notificationMessage,
+
+        recipientRole: "admin",
+        link: "/admin/reservations"
+    });
+};
+
+// ==========================================
 // GET ALL RESERVATIONS
+// ==========================================
+
 const getReservations = async (req, res) => {
     try {
         const {
@@ -130,7 +169,6 @@ const getReservations = async (req, res) => {
             .populate("createdBy", "fullName username")
             .sort({ reservationDate: -1, startTime: 1 });
 
-        // Search by customer name, username, or court
         if (search) {
             const keyword = search.toLowerCase();
 
@@ -163,6 +201,8 @@ const getReservations = async (req, res) => {
         });
 
     } catch (error) {
+        console.error("Get Reservations Error:", error);
+
         res.status(500).json({
             success: false,
             message: "Failed to retrieve reservations.",
@@ -171,7 +211,10 @@ const getReservations = async (req, res) => {
     }
 };
 
+// ==========================================
 // GET SINGLE RESERVATION
+// ==========================================
+
 const getReservationById = async (req, res) => {
     try {
         const { id } = req.params;
@@ -201,6 +244,8 @@ const getReservationById = async (req, res) => {
         });
 
     } catch (error) {
+        console.error("Get Reservation Error:", error);
+
         res.status(500).json({
             success: false,
             message: "Failed to retrieve reservation.",
@@ -209,7 +254,10 @@ const getReservationById = async (req, res) => {
     }
 };
 
+// ==========================================
 // CREATE RESERVATION
+// ==========================================
+
 const createReservation = async (req, res) => {
     try {
         const {
@@ -221,10 +269,7 @@ const createReservation = async (req, res) => {
             notes
         } = req.body;
 
-        // ==========================================
-        // 1. VALIDATE REQUIRED FIELDS
-        // ==========================================
-
+        // 1. Validate required fields
         if (
             !customerId ||
             !courtId ||
@@ -239,10 +284,7 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 2. VALIDATE MONGODB IDS
-        // ==========================================
-
+        // 2. Validate MongoDB IDs
         if (
             !mongoose.Types.ObjectId.isValid(customerId) ||
             !mongoose.Types.ObjectId.isValid(courtId)
@@ -253,10 +295,7 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 3. VALIDATE TIME FORMAT
-        // ==========================================
-
+        // 3. Validate time format
         const timePattern = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
         if (
@@ -269,10 +308,7 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 4. CALCULATE RESERVATION DURATION
-        // ==========================================
-
+        // 4. Calculate duration
         const duration = calculateDuration(startTime, endTime);
 
         if (duration <= 0) {
@@ -282,10 +318,7 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 5. VALIDATE RESERVATION DATE
-        // ==========================================
-
+        // 5. Validate reservation date
         const dateRange = getDateRange(reservationDate);
 
         if (!dateRange) {
@@ -305,10 +338,7 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 6. FIND ACTIVE CUSTOMER
-        // ==========================================
-
+        // 6. Find active customer
         const customer = await User.findOne({
             _id: customerId,
             role: "customer",
@@ -322,10 +352,7 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 7. FIND ACTIVE COURT
-        // ==========================================
-
+        // 7. Find active court
         const court = await Court.findOne({
             _id: courtId,
             isActive: true
@@ -338,16 +365,10 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 8. LOAD SYSTEM BOOKING SETTINGS
-        // ==========================================
-
+        // 8. Load booking settings
         const settings = await getBookingSettings();
 
-        // ==========================================
-        // 9. VALIDATE BOOKING RULES
-        // ==========================================
-
+        // 9. Validate booking rules
         const bookingError = validateBookingRules({
             reservationDate: dateRange.start,
             startTime,
@@ -363,10 +384,7 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 10. CHECK RESERVATION CONFLICTS
-        // ==========================================
-
+        // 10. Check reservation conflicts
         const conflict = await hasReservationConflict({
             courtId,
             reservationDate: dateRange.start,
@@ -382,16 +400,7 @@ const createReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 11. CALCULATE RESERVATION PRICE
-        // ==========================================
-
-        // Uses:
-        // - Court hourly rate for regular hours
-        // - System peak-hour rates for peak periods
-        // - Correct pricing when a reservation crosses
-        //   a peak-hour boundary
-
+        // 11. Calculate reservation price
         const totalAmount = calculateBookingAmount({
             startTime,
             endTime,
@@ -399,10 +408,7 @@ const createReservation = async (req, res) => {
             settings
         });
 
-        // ==========================================
-        // 12. CREATE RESERVATION
-        // ==========================================
-
+        // 12. Create reservation
         const reservation = await Reservation.create({
             customer: customerId,
             court: courtId,
@@ -412,13 +418,10 @@ const createReservation = async (req, res) => {
             duration,
             totalAmount,
             notes: notes || "",
-            createdBy: req.user._id
+            createdBy: req.user._id || req.user.id
         });
 
-        // ==========================================
-        // 13. POPULATE RESERVATION DETAILS
-        // ==========================================
-
+        // 13. Populate reservation details
         const populatedReservation = await Reservation.findById(
             reservation._id
         )
@@ -435,10 +438,33 @@ const createReservation = async (req, res) => {
                 "fullName username"
             );
 
-        // ==========================================
-        // 14. RETURN SUCCESS RESPONSE
-        // ==========================================
+        // 14. Record activity and create notification
+        await recordReservationActivity({
+            req,
+            reservation,
 
+            action: "reservation_created",
+
+            description:
+                `Created a reservation for ${customer.fullName} ` +
+                `at ${court.name}.`,
+
+            notificationTitle: "New Reservation",
+
+            notificationMessage:
+                `${customer.fullName} booked ${court.name}.`,
+
+            metadata: {
+                customerName: customer.fullName,
+                courtName: court.name,
+                reservationDate: reservation.reservationDate,
+                startTime,
+                endTime,
+                totalAmount
+            }
+        });
+
+        // 15. Return success
         return res.status(201).json({
             success: true,
             message: "Reservation created successfully.",
@@ -448,7 +474,6 @@ const createReservation = async (req, res) => {
     } catch (error) {
         console.error("Create Reservation Error:", error);
 
-        // Handle Mongoose validation errors
         if (error.name === "ValidationError") {
             return res.status(400).json({
                 success: false,
@@ -463,8 +488,6 @@ const createReservation = async (req, res) => {
         });
     }
 };
-
-
 
 // ==========================================
 // CREATE WALK-IN CUSTOMER AND RESERVATION
@@ -485,10 +508,7 @@ const createWalkInReservation = async (req, res) => {
             notes
         } = req.body;
 
-        // ==========================================
-        // 1. VALIDATE REQUIRED FIELDS
-        // ==========================================
-
+        // 1. Validate required fields
         if (
             !fullName ||
             !phone ||
@@ -499,14 +519,12 @@ const createWalkInReservation = async (req, res) => {
         ) {
             return res.status(400).json({
                 success: false,
-                message: "Customer name, phone, court, date, start time, and end time are required."
+                message:
+                    "Customer name, phone, court, date, start time, and end time are required."
             });
         }
 
-        // ==========================================
-        // 2. VALIDATE CUSTOMER INFORMATION
-        // ==========================================
-
+        // 2. Validate customer information
         const customerName = String(fullName).trim();
         const customerPhone = String(phone).trim();
 
@@ -524,10 +542,7 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 3. VALIDATE COURT ID
-        // ==========================================
-
+        // 3. Validate court ID
         if (!mongoose.Types.ObjectId.isValid(courtId)) {
             return res.status(400).json({
                 success: false,
@@ -535,10 +550,7 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 4. VALIDATE TIME FORMAT
-        // ==========================================
-
+        // 4. Validate time format
         const timePattern = /^([01]\d|2[0-3]):([0-5]\d)$/;
 
         if (
@@ -560,10 +572,7 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 5. VALIDATE RESERVATION DATE
-        // ==========================================
-
+        // 5. Validate reservation date
         const dateRange = getDateRange(reservationDate);
 
         if (!dateRange) {
@@ -583,10 +592,7 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 6. FIND ACTIVE COURT
-        // ==========================================
-
+        // 6. Find active court
         const court = await Court.findOne({
             _id: courtId,
             isActive: true
@@ -599,16 +605,10 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 7. LOAD BOOKING SETTINGS
-        // ==========================================
-
+        // 7. Load booking settings
         const settings = await getBookingSettings();
 
-        // ==========================================
-        // 8. VALIDATE BOOKING RULES
-        // ==========================================
-
+        // 8. Validate booking rules
         const bookingError = validateBookingRules({
             reservationDate: dateRange.start,
             startTime,
@@ -624,10 +624,7 @@ const createWalkInReservation = async (req, res) => {
             });
         }
 
-        // ==========================================
-        // 9. CHECK COURT AVAILABILITY
-        // ==========================================
-
+        // 9. Check court availability
         const conflict = await hasReservationConflict({
             courtId,
             reservationDate: dateRange.start,
@@ -638,14 +635,12 @@ const createWalkInReservation = async (req, res) => {
         if (conflict) {
             return res.status(409).json({
                 success: false,
-                message: "This court already has a reservation during the selected time."
+                message:
+                    "This court already has a reservation during the selected time."
             });
         }
 
-        // ==========================================
-        // 10. CALCULATE TOTAL AMOUNT
-        // ==========================================
-
+        // 10. Calculate total amount
         const totalAmount = calculateBookingAmount({
             startTime,
             endTime,
@@ -653,18 +648,13 @@ const createWalkInReservation = async (req, res) => {
             settings
         });
 
-        // ==========================================
-        // 11. GENERATE PRIVATE CUSTOMER CREDENTIALS
-        // ==========================================
-
-        // Walk-in customers do not need login credentials.
-        // Random credentials satisfy the existing User schema.
-
+        // 11. Generate private customer credentials
         const randomSuffix = crypto
             .randomBytes(6)
             .toString("hex");
 
-        const username = `walkin_${Date.now().toString(36)}_${randomSuffix}`;
+        const username =
+            `walkin_${Date.now().toString(36)}_${randomSuffix}`;
 
         const randomPassword = crypto
             .randomBytes(32)
@@ -675,10 +665,7 @@ const createWalkInReservation = async (req, res) => {
             12
         );
 
-        // ==========================================
-        // 12. CREATE WALK-IN CUSTOMER
-        // ==========================================
-
+        // 12. Create walk-in customer
         createdCustomer = await User.create({
             fullName: customerName,
             username,
@@ -688,10 +675,7 @@ const createWalkInReservation = async (req, res) => {
             isActive: true
         });
 
-        // ==========================================
-        // 13. CREATE RESERVATION
-        // ==========================================
-
+        // 13. Create reservation
         const reservation = await Reservation.create({
             customer: createdCustomer._id,
             court: courtId,
@@ -701,13 +685,10 @@ const createWalkInReservation = async (req, res) => {
             duration,
             totalAmount,
             notes: notes || "Walk-in booking",
-            createdBy: req.user._id
+            createdBy: req.user._id || req.user.id
         });
 
-        // ==========================================
-        // 14. POPULATE RESERVATION DETAILS
-        // ==========================================
-
+        // 14. Populate reservation details
         const populatedReservation = await Reservation.findById(
             reservation._id
         )
@@ -715,29 +696,55 @@ const createWalkInReservation = async (req, res) => {
             .populate("court", "name courtNumber hourlyRate")
             .populate("createdBy", "fullName username");
 
-        // ==========================================
-        // 15. RETURN SUCCESS
-        // ==========================================
+        // 15. Record walk-in activity
+        await recordReservationActivity({
+            req,
+            reservation,
 
+            action: "walk_in_reservation_created",
+
+            description:
+                `Created a walk-in reservation for ${customerName} ` +
+                `at ${court.name}.`,
+
+            notificationTitle: "New Walk-in Reservation",
+
+            notificationMessage:
+                `${customerName} was registered for a walk-in booking ` +
+                `at ${court.name}.`,
+
+            metadata: {
+                customerName,
+                customerPhone,
+                courtName: court.name,
+                reservationDate: reservation.reservationDate,
+                startTime,
+                endTime,
+                totalAmount,
+                bookingType: "walk-in"
+            }
+        });
+
+        // 16. Return success
         return res.status(201).json({
             success: true,
-            message: "Walk-in customer and reservation created successfully.",
+            message:
+                "Walk-in customer and reservation created successfully.",
+
             customer: {
                 _id: createdCustomer._id,
                 fullName: createdCustomer.fullName,
                 phone: createdCustomer.phone,
                 role: createdCustomer.role
             },
+
             reservation: populatedReservation
         });
 
     } catch (error) {
         console.error("Walk-In Reservation Error:", error);
 
-        // ==========================================
-        // 16. CLEAN UP CUSTOMER IF BOOKING FAILS
-        // ==========================================
-
+        // Clean up customer if reservation creation fails
         if (createdCustomer?._id) {
             try {
                 await User.findByIdAndDelete(createdCustomer._id);
@@ -752,7 +759,8 @@ const createWalkInReservation = async (req, res) => {
         if (error.code === 11000) {
             return res.status(409).json({
                 success: false,
-                message: "A duplicate customer record was detected. Please try again."
+                message:
+                    "A duplicate customer record was detected. Please try again."
             });
         }
 
@@ -771,9 +779,10 @@ const createWalkInReservation = async (req, res) => {
     }
 };
 
-
-
+// ==========================================
 // UPDATE RESERVATION
+// ==========================================
+
 const updateReservation = async (req, res) => {
     try {
         const { id } = req.params;
@@ -803,18 +812,31 @@ const updateReservation = async (req, res) => {
             });
         }
 
-        if (reservation.status === "Cancelled" || reservation.status === "Completed") {
+        if (
+            reservation.status === "Cancelled" ||
+            reservation.status === "Completed"
+        ) {
             return res.status(400).json({
                 success: false,
-                message: "Cancelled or completed reservations cannot be edited."
+                message:
+                    "Cancelled or completed reservations cannot be edited."
             });
         }
 
-        const nextCustomerId = customerId || reservation.customer.toString();
-        const nextCourtId = courtId || reservation.court.toString();
-        const nextDate = reservationDate || reservation.reservationDate;
-        const nextStartTime = startTime || reservation.startTime;
-        const nextEndTime = endTime || reservation.endTime;
+        const nextCustomerId =
+            customerId || reservation.customer.toString();
+
+        const nextCourtId =
+            courtId || reservation.court.toString();
+
+        const nextDate =
+            reservationDate || reservation.reservationDate;
+
+        const nextStartTime =
+            startTime || reservation.startTime;
+
+        const nextEndTime =
+            endTime || reservation.endTime;
 
         if (
             !mongoose.Types.ObjectId.isValid(nextCustomerId) ||
@@ -838,12 +860,16 @@ const updateReservation = async (req, res) => {
             });
         }
 
-        const duration = calculateDuration(nextStartTime, nextEndTime);
+        const duration = calculateDuration(
+            nextStartTime,
+            nextEndTime
+        );
 
         if (duration < 0.5) {
             return res.status(400).json({
                 success: false,
-                message: "End time must be later than start time and the minimum duration is 30 minutes."
+                message:
+                    "End time must be later than start time and the minimum duration is 30 minutes."
             });
         }
 
@@ -902,9 +928,20 @@ const updateReservation = async (req, res) => {
         if (conflict) {
             return res.status(409).json({
                 success: false,
-                message: "This court already has a reservation during the selected time."
+                message:
+                    "This court already has a reservation during the selected time."
             });
         }
+
+        // Save previous values for the activity history
+        const previousValues = {
+            customer: reservation.customer.toString(),
+            court: reservation.court.toString(),
+            reservationDate: reservation.reservationDate,
+            startTime: reservation.startTime,
+            endTime: reservation.endTime,
+            totalAmount: reservation.totalAmount
+        };
 
         reservation.customer = nextCustomerId;
         reservation.court = nextCourtId;
@@ -912,6 +949,7 @@ const updateReservation = async (req, res) => {
         reservation.startTime = nextStartTime;
         reservation.endTime = nextEndTime;
         reservation.duration = duration;
+
         reservation.totalAmount = Number(
             (duration * court.hourlyRate).toFixed(2)
         );
@@ -927,14 +965,51 @@ const updateReservation = async (req, res) => {
             .populate("court", "name courtNumber hourlyRate")
             .populate("createdBy", "fullName username");
 
-        res.status(200).json({
+        // Record update activity
+        await recordReservationActivity({
+            req,
+            reservation,
+
+            action: "reservation_updated",
+
+            description:
+                `Updated the reservation for ` +
+                `${updatedReservation.customer?.fullName || "a customer"} ` +
+                `at ${updatedReservation.court?.name || "a court"}.`,
+
+            notificationTitle: "Reservation Updated",
+
+            notificationMessage:
+                `A reservation for ` +
+                `${updatedReservation.customer?.fullName || "a customer"} ` +
+                `has been updated.`,
+
+            metadata: {
+                previousValues,
+                updatedValues: {
+                    customerName:
+                        updatedReservation.customer?.fullName,
+                    courtName:
+                        updatedReservation.court?.name,
+                    reservationDate:
+                        updatedReservation.reservationDate,
+                    startTime: updatedReservation.startTime,
+                    endTime: updatedReservation.endTime,
+                    totalAmount: updatedReservation.totalAmount
+                }
+            }
+        });
+
+        return res.status(200).json({
             success: true,
             message: "Reservation updated successfully.",
             reservation: updatedReservation
         });
 
     } catch (error) {
-        res.status(500).json({
+        console.error("Update Reservation Error:", error);
+
+        return res.status(500).json({
             success: false,
             message: "Failed to update reservation.",
             error: error.message
@@ -942,7 +1017,10 @@ const updateReservation = async (req, res) => {
     }
 };
 
+// ==========================================
 // UPDATE RESERVATION STATUS
+// ==========================================
+
 const updateReservationStatus = async (req, res) => {
     try {
         const { id } = req.params;
@@ -984,22 +1062,59 @@ const updateReservationStatus = async (req, res) => {
         ) {
             return res.status(400).json({
                 success: false,
-                message: "This reservation is already finalized."
+                message:
+                    "This reservation is already finalized."
             });
         }
+
+        // Save old status before changing it
+        const previousStatus = reservation.status;
 
         reservation.status = status;
 
         await reservation.save();
 
-        res.status(200).json({
+        const populatedReservation = await Reservation.findById(id)
+            .populate("customer", "fullName username")
+            .populate("court", "name courtNumber");
+
+        // Record status change activity
+        await recordReservationActivity({
+            req,
+            reservation,
+
+            action: "reservation_status_updated",
+
+            description:
+                `Changed reservation status from ${previousStatus} ` +
+                `to ${status}.`,
+
+            notificationTitle: "Reservation Status Updated",
+
+            notificationMessage:
+                `Reservation status changed from ${previousStatus} ` +
+                `to ${status}.`,
+
+            metadata: {
+                previousStatus,
+                newStatus: status,
+                customerName:
+                    populatedReservation.customer?.fullName,
+                courtName:
+                    populatedReservation.court?.name
+            }
+        });
+
+        return res.status(200).json({
             success: true,
             message: "Reservation status updated successfully.",
-            reservation
+            reservation: populatedReservation
         });
 
     } catch (error) {
-        res.status(500).json({
+        console.error("Update Reservation Status Error:", error);
+
+        return res.status(500).json({
             success: false,
             message: "Failed to update reservation status.",
             error: error.message
@@ -1007,7 +1122,10 @@ const updateReservationStatus = async (req, res) => {
     }
 };
 
+// ==========================================
 // EXPORT CONTROLLER FUNCTIONS
+// ==========================================
+
 module.exports = {
     getReservations,
     getReservationById,

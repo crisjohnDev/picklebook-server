@@ -23,6 +23,8 @@ const paymentRoutes = require("./routes/paymentRoutes");
 const reportRoutes = require("./routes/reportRoutes");
 const settingRoutes = require("./routes/settingRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
+const notificationRoutes = require("./routes/notificationRoutes");
+const activityLogRoutes = require("./routes/activityLogRoutes");
 
 const userManagementRoutes = require("./routes/userManagementRoutes");
 
@@ -101,7 +103,8 @@ app.use("/api/courts", courtRoutes);
 // requests intended for User Management.
 
 app.use("/api/admin/users", userManagementRoutes);
-
+app.use("/api/notifications", notificationRoutes);
+app.use("/api/activity-logs", activityLogRoutes);
 // ==========================================
 // ADMIN ROUTES
 // ==========================================
