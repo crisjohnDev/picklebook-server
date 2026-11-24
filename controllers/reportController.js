@@ -3,23 +3,50 @@ const Payment = require("../models/Payment");
 const Reservation = require("../models/Reservation");
 
 // ==========================================
+// TIMEZONE CONFIGURATION
+// ==========================================
+
+const TIMEZONE = "Asia/Manila";
+const TIMEZONE_OFFSET = 8 * 60 * 60 * 1000;
+
+// Get date/time parts in Philippine timezone.
+const getManilaParts = (date) => {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+        timeZone: TIMEZONE,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hourCycle: "h23"
+    }).formatToParts(date);
+
+    const result = {};
+
+    parts.forEach((part) => {
+        if (part.type !== "literal") {
+            result[part.type] = Number(part.value);
+        }
+    });
+
+    return result;
+};
+
+// ==========================================
 // DATE HELPERS
 // ==========================================
 
-// Add leading zero to month, day, and hour values.
 const pad = (value) => String(value).padStart(2, "0");
 
-// Convert a Date object into YYYY-MM-DD.
-// Uses local date values to avoid UTC date shifting.
+// Convert a date into YYYY-MM-DD using Manila time.
 const toDateKey = (date) => {
-    return [
-        date.getFullYear(),
-        pad(date.getMonth() + 1),
-        pad(date.getDate())
-    ].join("-");
+    const parts = getManilaParts(date);
+
+    return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
 };
 
-// Parse YYYY-MM-DD as a local date.
+// Parse YYYY-MM-DD without depending on server timezone.
 const parseDate = (value) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value || "")) {
         return null;
@@ -27,18 +54,38 @@ const parseDate = (value) => {
 
     const [year, month, day] = value.split("-").map(Number);
 
-    const date = new Date(year, month - 1, day);
+    const test = new Date(Date.UTC(year, month - 1, day));
 
-    // Reject invalid dates such as February 30.
     if (
-        date.getFullYear() !== year ||
-        date.getMonth() !== month - 1 ||
-        date.getDate() !== day
+        test.getUTCFullYear() !== year ||
+        test.getUTCMonth() !== month - 1 ||
+        test.getUTCDate() !== day
     ) {
         return null;
     }
 
-    return date;
+    return { year, month, day };
+};
+
+// Convert Philippine calendar date/time into a UTC Date.
+// Philippines has no daylight-saving time and uses UTC+8.
+const manilaDate = (year, month, day, hour = 0) => {
+    return new Date(
+        Date.UTC(year, month - 1, day, hour) - TIMEZONE_OFFSET
+    );
+};
+
+// Add calendar days without using the server timezone.
+const addCalendarDays = (date, days) => {
+    const result = new Date(
+        Date.UTC(date.year, date.month - 1, date.day + days)
+    );
+
+    return {
+        year: result.getUTCFullYear(),
+        month: result.getUTCMonth() + 1,
+        day: result.getUTCDate()
+    };
 };
 
 // ==========================================
@@ -46,70 +93,84 @@ const parseDate = (value) => {
 // ==========================================
 
 const getPeriodRange = (period, selectedDate) => {
-    const date = new Date(selectedDate);
+    let startDate;
+    let endDate;
 
     if (period === "daily") {
-        const start = new Date(
-            date.getFullYear(),
-            date.getMonth(),
-            date.getDate()
-        );
-
-        const end = new Date(
-            date.getFullYear(),
-            date.getMonth(),
-            date.getDate() + 1
-        );
-
-        return { start, end };
+        startDate = selectedDate;
+        endDate = addCalendarDays(selectedDate, 1);
     }
 
-    if (period === "weekly") {
-        const start = new Date(
-            date.getFullYear(),
-            date.getMonth(),
-            date.getDate()
+    else if (period === "weekly") {
+        const selected = new Date(
+            Date.UTC(
+                selectedDate.year,
+                selectedDate.month - 1,
+                selectedDate.day
+            )
         );
+
+        const day = selected.getUTCDay();
 
         // Monday is the first day of the week.
-        const day = start.getDay();
         const difference = day === 0 ? -6 : 1 - day;
 
-        start.setDate(start.getDate() + difference);
-
-        const end = new Date(start);
-        end.setDate(end.getDate() + 7);
-
-        return { start, end };
+        startDate = addCalendarDays(selectedDate, difference);
+        endDate = addCalendarDays(startDate, 7);
     }
 
-    if (period === "monthly") {
-        const start = new Date(
-            date.getFullYear(),
-            date.getMonth(),
-            1
+    else if (period === "monthly") {
+        startDate = {
+            year: selectedDate.year,
+            month: selectedDate.month,
+            day: 1
+        };
+
+        const nextMonth = new Date(
+            Date.UTC(
+                selectedDate.year,
+                selectedDate.month,
+                1
+            )
         );
 
-        const end = new Date(
-            date.getFullYear(),
-            date.getMonth() + 1,
-            1
-        );
-
-        return { start, end };
+        endDate = {
+            year: nextMonth.getUTCFullYear(),
+            month: nextMonth.getUTCMonth() + 1,
+            day: 1
+        };
     }
 
-    return null;
+    else {
+        return null;
+    }
+
+    return {
+        start: manilaDate(
+            startDate.year,
+            startDate.month,
+            startDate.day
+        ),
+
+        end: manilaDate(
+            endDate.year,
+            endDate.month,
+            endDate.day
+        ),
+
+        startDate,
+        endDate
+    };
 };
 
 // ==========================================
 // CHART BUCKETS
 // ==========================================
 
-const createBuckets = (period, start, end) => {
+const createBuckets = (period, range) => {
     const buckets = [];
 
-    // Daily report: 24 hourly buckets.
+    // Daily: 24 hourly buckets.
     if (period === "daily") {
         for (let hour = 0; hour < 24; hour++) {
             buckets.push({
@@ -127,26 +188,52 @@ const createBuckets = (period, start, end) => {
         return buckets;
     }
 
-    // Weekly and monthly reports: one bucket per day.
-    const current = new Date(start);
+    // Weekly/monthly: one bucket per calendar day.
+    const current = { ...range.startDate };
 
-    while (current < end) {
-        const key = toDateKey(current);
+    while (
+        current.year < range.endDate.year ||
+        (
+            current.year === range.endDate.year &&
+            (
+                current.month < range.endDate.month ||
+                (
+                    current.month === range.endDate.month &&
+                    current.day < range.endDate.day
+                )
+            )
+        )
+    ) {
+        const key = [
+            current.year,
+            pad(current.month),
+            pad(current.day)
+        ].join("-");
+
+        const calendarDate = new Date(
+            Date.UTC(
+                current.year,
+                current.month - 1,
+                current.day
+            )
+        );
 
         buckets.push({
             key,
 
             label: period === "weekly"
-                ? current.toLocaleDateString("en-PH", {
-                    weekday: "short"
+                ? calendarDate.toLocaleDateString("en-PH", {
+                    weekday: "short",
+                    timeZone: "UTC"
                 })
-                : String(current.getDate()),
+                : String(current.day),
 
             revenue: 0,
             bookings: 0
         });
 
-        current.setDate(current.getDate() + 1);
+        const next = addCalendarDays(current, 1);
+        Object.assign(current, next);
     }
 
     return buckets;
@@ -157,11 +244,13 @@ const createBuckets = (period, start, end) => {
 // ==========================================
 
 const getBucketKey = (date, period) => {
+    const parts = getManilaParts(date);
+
     if (period === "daily") {
-        return String(date.getHours());
+        return String(parts.hour);
     }
 
-    return toDateKey(date);
+    return `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`;
 };
 
 // ==========================================
@@ -183,6 +272,26 @@ const toNumber = (value) => {
 };
 
 // ==========================================
+// GET RESERVATION START HOUR
+// ==========================================
+
+const getReservationHour = (startTime) => {
+    if (!startTime) {
+        return null;
+    }
+
+    const match = String(startTime).match(/^(\d{1,2}):\d{2}/);
+
+    if (!match) {
+        return null;
+    }
+
+    const hour = Number(match[1]);
+
+    return hour >= 0 && hour <= 23 ? hour : null;
+};
+
+// ==========================================
 // GET REPORTS
 // GET /api/reports?period=daily&date=2026-11-24
 // ==========================================
@@ -195,7 +304,7 @@ const getReports = async (req, res) => {
         } = req.query;
 
         // --------------------------------------
-        // VALIDATE REPORT PERIOD
+        // VALIDATE PERIOD
         // --------------------------------------
 
         if (!["daily", "weekly", "monthly"].includes(period)) {
@@ -206,7 +315,7 @@ const getReports = async (req, res) => {
         }
 
         // --------------------------------------
-        // VALIDATE SELECTED DATE
+        // VALIDATE DATE
         // --------------------------------------
 
         const selectedDate = parseDate(date);
@@ -219,7 +328,7 @@ const getReports = async (req, res) => {
         }
 
         // --------------------------------------
-        // GET REPORT DATE RANGE
+        // GET DATE RANGE
         // --------------------------------------
 
         const range = getPeriodRange(period, selectedDate);
@@ -234,14 +343,12 @@ const getReports = async (req, res) => {
         const { start, end } = range;
 
         // --------------------------------------
-        // GET DATABASE RECORDS
+        // DATABASE QUERIES
         // --------------------------------------
         // IMPORTANT:
-        // This assumes your Payment model uses
-        // paymentDate and your Reservation model
-        // uses reservationDate.
-        //
-        // These field names must match your schemas.
+        // These fields must match your Mongoose schemas:
+        // Payment.paymentDate
+        // Reservation.reservationDate
 
         const [payments, reservations] = await Promise.all([
             Payment.find({
@@ -265,10 +372,16 @@ const getReports = async (req, res) => {
                 .lean()
         ]);
 
+        // --------------------------------------
+        // DEBUG LOGS
+        // --------------------------------------
+
         console.log("========== REPORT DEBUG ==========");
         console.log("Period:", period);
-        console.log("Start:", start);
-        console.log("End:", end);
+        console.log("Selected Date:", date);
+        console.log("Timezone:", TIMEZONE);
+        console.log("Start:", start.toISOString());
+        console.log("End:", end.toISOString());
         console.log("Payments found:", payments.length);
         console.log("Reservations found:", reservations.length);
         console.log("==================================");
@@ -277,7 +390,7 @@ const getReports = async (req, res) => {
         // CREATE CHART BUCKETS
         // --------------------------------------
 
-        const buckets = createBuckets(period, start, end);
+        const buckets = createBuckets(period, range);
 
         const bucketMap = new Map(
             buckets.map((bucket) => [bucket.key, bucket])
@@ -303,12 +416,7 @@ const getReports = async (req, res) => {
             const paymentDate = new Date(payment.paymentDate);
 
             const key = getBucketKey(paymentDate, period);
-
             const bucket = bucketMap.get(key);
-
-            // ----------------------------------
-            // PAID PAYMENTS
-            // ----------------------------------
 
             if (status === "paid") {
                 totalRevenue += amount;
@@ -319,25 +427,13 @@ const getReports = async (req, res) => {
                 }
             }
 
-            // ----------------------------------
-            // PENDING PAYMENTS
-            // ----------------------------------
-
             else if (status === "pending") {
                 pendingPayments += 1;
             }
 
-            // ----------------------------------
-            // REJECTED PAYMENTS
-            // ----------------------------------
-
             else if (status === "rejected") {
                 rejectedPayments += 1;
             }
-
-            // ----------------------------------
-            // REFUNDED PAYMENTS
-            // ----------------------------------
 
             else if (status === "refunded") {
                 refundedPayments += 1;
@@ -361,18 +457,14 @@ const getReports = async (req, res) => {
                 reservation.reservationDate
             );
 
-            // ----------------------------------
-            // DAILY REPORT USES RESERVATION HOUR
-            // ----------------------------------
-
             let key;
 
             if (period === "daily") {
-                const hour = Number(
-                    String(reservation.startTime || "0:0").split(":")[0]
+                const hour = getReservationHour(
+                    reservation.startTime
                 );
 
-                key = String(hour);
+                key = hour === null ? null : String(hour);
             } else {
                 key = getBucketKey(reservationDate, period);
             }
@@ -382,10 +474,6 @@ const getReports = async (req, res) => {
             if (bucket) {
                 bucket.bookings += 1;
             }
-
-            // ----------------------------------
-            // RESERVATION STATUS
-            // ----------------------------------
 
             if (status === "confirmed") {
                 confirmedReservations += 1;
@@ -422,13 +510,12 @@ const getReports = async (req, res) => {
                 };
             }
 
-            const amount = toNumber(payment.amount);
-
             paymentMethods[method].count += 1;
 
-            // Only paid payments contribute to collected amount.
             if (normalizeStatus(payment.status) === "paid") {
-                paymentMethods[method].amount += amount;
+                paymentMethods[method].amount += toNumber(
+                    payment.amount
+                );
             }
         });
 
@@ -441,15 +528,24 @@ const getReports = async (req, res) => {
 
             period,
 
-            selectedDate: toDateKey(selectedDate),
+            selectedDate: [
+                selectedDate.year,
+                pad(selectedDate.month),
+                pad(selectedDate.day)
+            ].join("-"),
 
             dateRange: {
-                start: toDateKey(start),
+                start: [
+                    range.startDate.year,
+                    pad(range.startDate.month),
+                    pad(range.startDate.day)
+                ].join("-"),
 
-                // Display inclusive ending date.
-                end: toDateKey(
-                    new Date(end.getTime() - 1)
-                )
+                end: [
+                    range.endDate.year,
+                    pad(range.endDate.month),
+                    pad(range.endDate.day)
+                ].join("-")
             },
 
             summary: {
@@ -493,6 +589,7 @@ const getReports = async (req, res) => {
         return res.status(500).json({
             success: false,
             message: "Failed to generate reports.",
+
             ...(process.env.NODE_ENV !== "production" && {
                 error: error.message
             })
@@ -501,7 +598,7 @@ const getReports = async (req, res) => {
 };
 
 // ==========================================
-// EXPORT CONTROLLER
+// EXPORT
 // ==========================================
 
 module.exports = {
